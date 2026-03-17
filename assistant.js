@@ -7,6 +7,8 @@ import { exec, execSync } from "child_process";
 
 dotenv.config();
 
+
+
 // const elevenlabs = new ElevenLabsClient({
 //     apiKey: process.env.ELEVENLABS_API_KEY, // Defaults to process.env.ELEVENLABS_API_KEY
 // });
@@ -27,7 +29,7 @@ async function textToAudio(message) {
     const response = await fetch(`http://localhost:5002/api/tts?text=${message}`);
     const audioBuffer = await response.arrayBuffer();
     writeFileSync("output.wav", Buffer.from(audioBuffer));
-    execSync("ffplay -nodisp -autoexit output.wav");
+    execSync("ffplay -nodisp -autoexit -loglevel quiet output.wav");
 }
 
 
@@ -37,6 +39,7 @@ const client = new OpenAI({
 });
 
 const MEMORY_FILE = "memory.json";
+const CONVERSATION_FILE = "conversation.json";
 
 // Load memory
 function loadMemory() {
@@ -44,6 +47,13 @@ function loadMemory() {
     const raw = fs.readFileSync(MEMORY_FILE);
     const memories = JSON.parse(raw);
     return Array.isArray(memories) ? memories : [memories];
+}
+
+function loadConversation() {
+    if (!fs.existsSync(CONVERSATION_FILE)) return {};
+    const raw = fs.readFileSync(CONVERSATION_FILE);
+    const conversation = JSON.parse(raw);
+    return Array.isArray(conversation) ? conversation : [conversation];
 }
 
 // Save memory
@@ -63,6 +73,18 @@ function saveMemory(memory) {
 }
 
 let memory = loadMemory();
+let conversationHistory = [];
+
+// Filter memories by relevance to the current message
+function getRelevantMemories(memories, message) {
+    if (!memories.length) return [];
+    const msgLower = message.toLowerCase();
+    return memories.filter(mem => {
+        const memStr = JSON.stringify(mem).toLowerCase();
+        // Keep a memory if any of its words appear in the message
+        return memStr.split(/\W+/).some(word => word.length > 3 && msgLower.includes(word));
+    });
+}
 
 async function askAI(message) {
   //console.log('prompt', prompt);
@@ -77,29 +99,35 @@ async function askAI(message) {
         "X-Title": "<YOUR_SITE_NAME>", // Optional. Site title for rankings on openrouter.ai.
       }
     });
+
+    conversationHistory.push({ role: "user", content: message });
+    console.log("conversation history: ", conversationHistory);
+
+    const relevantMemories = getRelevantMemories(memory, message);
+
+    const systemPrompt = `You are Sébastien's personal AI assistant.
+      Maintain context across the conversation — follow-ups continue from the previous exchange.${
+              relevantMemories.length > 0 ? `\nRelevant memory: ${JSON.stringify(relevantMemories)}` : ""
+          }`;
+
+      const MAX_TURNS = 10
+      const trimmedHistory = conversationHistory.slice(-MAX_TURNS);
+      
       completion = await openai.chat.completions.create({
         model: "openrouter/hunter-alpha",
         messages: [
-          {
-            "role": "user",
-            "content": [
-              {
-                "type": "text",
-                "text": `You are Sébastien's personal AI assistant.
-                        User memory: ${JSON.stringify(memory)}message
-                        
-                        User message: ${message}`
-              }
-            ]
-          }
+            {"role": "system", content: systemPrompt},
+              ...trimmedHistory
         ],
         
       });
     } catch(e) {
-      console.log('Failed to get an answer from the LLM');
+      console.log('Failed to get an answer from the LLM: ', e);
     }
+    const reply = completion.choices[0].message.content;
     //console.log('Completion: ', completion.choices[0].message.content);
-    return completion.choices[0].message.content;
+    conversationHistory.push({ role: "assistant", content: reply});
+    return (reply);
 }
 
 async function main() {
@@ -118,12 +146,13 @@ async function main() {
         continue;
     }
 
+    
     if (userInput === "open vscode") {
         exec("code");
         console.log("Opening VSCode...");
         continue;
-    }
-
+      }
+      
     const reply = await askAI(userInput);
 
     console.log("\x1b[32mAI:", reply, "\x1b[0m\n");
