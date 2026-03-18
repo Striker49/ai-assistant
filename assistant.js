@@ -5,7 +5,7 @@ import dotenv from "dotenv";
 import { MEMORY_FILE, MAX_TURNS } from "./config.js";
 import { loadJsonArray, addMemory, getRelevantMemories } from "./memory.js";
 import { recordAudio, transcribeAudio, textToAudio, stopAudio } from "./voice.js";
-import { tools } from "./tools.js";
+import { tools, toolPermissions } from "./tools.js";
 
 dotenv.config();
 
@@ -25,32 +25,39 @@ function buildSystemPrompt(latestUserMessage = "") {
   const relevantMemories = getRelevantMemories(memory, latestUserMessage);
 
   return `You are Catherine, Sebastien's personal AI assistant.
-    Be helpful, natural, and concise.
-    Keep responses suitable for speaking out loud.
-    Maintain context across the conversation.
+Be helpful, natural, and concise.
+Keep responses suitable for speaking out loud.
+Maintain context across the conversation.
 
-    You can either:
-    - answer normally
-    - or request a tool call when an action is needed
+You can either:
+- answer normally
+- or request a tool call when an action is needed
 
-    IMPORTANT:
-    - Never pretend you performed an action if no tool was used.
-    - When you want to use a tool, reply ONLY with valid JSON.
-    - The JSON format must be exactly:
-    {"tool":"tool_name","args":{"key":"value"}}
-    - If no tool is needed, answer normally.
+IMPORTANT RULES:
+- Never pretend you performed an action if no tool was used.
+- When you want to use a tool, reply ONLY with valid JSON.
+- Do not wrap the JSON in markdown.
+- The JSON format must be exactly:
+{"tool":"tool_name","args":{"key":"value"}}
+- If no tool is needed, answer normally.
+- Prefer using tools when the user asks you to do something on the computer.
+- After receiving a tool result, either use another tool or give the final answer.
 
-    Available tools:
-    - open_vscode: Open Visual Studio Code. Args: {}
-    - read_file: Read a text file from disk. Args: { "path": "string" }
-    - write_file: Write a text file. Args: { "path": "string", "content": "string" }
-    - list_files: List files in a directory. Args: { "path": "string" }
+Available tools:
+- open_vscode: Open Visual Studio Code. Args: {}
+- open_browser: Open a website in the browser. Args: { "url": "string" }
+- open_folder: Open a folder in the file explorer. Args: { "path": "string" }
+- read_file: Read a text file from disk. Args: { "path": "string" }
+- write_file: Write a text file. Args: { "path": "string", "content": "string" }
+- append_file: Append text to a file. Args: { "path": "string", "content": "string" }
+- list_files: List files in a directory. Args: { "path": "string" }
+- search_files: Search for text inside files in a directory. Args: { "path": "string", "query": "string" }
 
-    ${
-      relevantMemories.length > 0
-        ? `Relevant memory: ${JSON.stringify(relevantMemories)}`
-        : ""
-    }`;
+${
+  relevantMemories.length > 0
+    ? `Relevant memory: ${JSON.stringify(relevantMemories)}`
+    : ""
+}`;
 }
 
 async function askAIFromHistory(latestUserMessage = "") {
@@ -71,12 +78,45 @@ async function askAIFromHistory(latestUserMessage = "") {
 
 function tryParseToolCall(reply) {
   try {
-    const parsed = JSON.parse(reply);
-    if (parsed.tool && parsed.args !== undefined) {
+    const cleaned = reply.trim().replace(/^```json\s*|```$/g, "");
+    const parsed = JSON.parse(cleaned);
+
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      typeof parsed.tool === "string" &&
+      parsed.args !== undefined
+    ) {
       return parsed;
     }
   } catch (e) {}
+
   return null;
+}
+
+function askToolConfirmation(toolName, args) {
+  console.log(`⚠️  Tool "${toolName}" wants to run with:`);
+  console.log(JSON.stringify(args, null, 2));
+  const answer = readlineSync.question("Allow? (y/n): ").trim().toLowerCase();
+  return answer === "y" || answer === "yes";
+}
+
+async function executeTool(toolName, args) {
+  const tool = tools[toolName];
+  if (!tool) {
+    throw new Error(`Unknown tool: ${toolName}`);
+  }
+
+  const permission = toolPermissions[toolName] || "confirm";
+
+  if (permission === "confirm") {
+    const allowed = askToolConfirmation(toolName, args);
+    if (!allowed) {
+      return `User denied permission for tool: ${toolName}`;
+    }
+  }
+
+  return await tool.execute(args || {});
 }
 
 async function handleAgenticTurn(userInput) {
@@ -93,27 +133,19 @@ async function handleAgenticTurn(userInput) {
       return reply;
     }
 
-    const tool = tools[toolCall.tool];
-
-    if (!tool) {
-      conversationHistory.push({
-        role: "system",
-        content: `Unknown tool: ${toolCall.tool}`,
-      });
-      continue;
-    }
-
     try {
-      const result = await tool.execute(toolCall.args || {});
+      const result = await executeTool(toolCall.tool, toolCall.args);
 
       conversationHistory.push({
         role: "assistant",
-        content: reply,
+        content: JSON.stringify(toolCall),
       });
 
       conversationHistory.push({
         role: "system",
-        content: `Tool result for ${toolCall.tool}: ${typeof result === "string" ? result : JSON.stringify(result)}`,
+        content: `Tool result for ${toolCall.tool}: ${
+          typeof result === "string" ? result : JSON.stringify(result)
+        }`,
       });
 
       conversationHistory = conversationHistory.slice(-MAX_TURNS * 2);
