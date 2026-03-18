@@ -1,13 +1,17 @@
 import fs from "fs";
 import { AUDIO_FILE, MIC_NAME, WHISPER_EXE, WHISPER_MODEL } from "./config.js";
-import { spawn } from "child_process";
+import { spawn, execSync } from "child_process";
 
 let currentAudioPlayer = null;
 const OUTPUT_FILE = "audio/output.wav";
 
 export function stopAudio() {
-  if (currentAudioPlayer && !currentAudioPlayer.killed) {
-    currentAudioPlayer.kill();
+  if (currentAudioPlayer) {
+    try {
+      execSync(`taskkill /pid ${currentAudioPlayer.pid} /f /t`, { stdio: "ignore" });
+    } catch (err) {
+      // process may already be gone
+    }
     currentAudioPlayer = null;
   }
 }
