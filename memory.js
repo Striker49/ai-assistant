@@ -17,14 +17,14 @@ export function saveJsonArray(path, data) {
   fs.writeFileSync(path, JSON.stringify(data, null, 2), "utf-8");
 }
 
-export function addMemory(memory, note, type = "general") {
+export function addMemory(note) {
+const oldMemories = loadJsonArray(MEMORY_FILE);
   const entry = {
-    type,
     note,
     createdAt: new Date().toISOString(),
   };
-  memory.push(entry);
-  saveJsonArray(MEMORY_FILE, memory);
+  oldMemories.push(entry);
+  saveJsonArray(MEMORY_FILE, oldMemories);
 }
 
 export function getRelevantMemories(memories, message) {

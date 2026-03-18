@@ -29,6 +29,9 @@ async function askAI(message) {
   const relevantMemories = getRelevantMemories(memory, message);
 
   const systemPrompt = `You are Catherine, Sebastien's personal AI assistant.
+    Be helpful, natural, and concise.
+    Keep responses suitable for speaking out loud.
+    Avoid unnecessary formatting.
     Maintain context across the conversation — follow-ups continue from the previous exchange.
     ${
       relevantMemories.length > 0
@@ -58,7 +61,7 @@ function cleanReplyForSpeech(reply) {
 }
 
 async function handleUserInput(userInput) {
-  const trimmed = userInput.trim();
+  const trimmed = userInput.trim().toLowerCase();
 
   if (!trimmed) return;
   if (trimmed.toLowerCase() === "exit") {
@@ -69,7 +72,7 @@ async function handleUserInput(userInput) {
     const data = trimmed.replace(/^remember /i, "").trim();
     addMemory(data);
     console.log("🧠 Memory saved.");
-    return;
+    //return;
   }
 
   if (trimmed.toLowerCase() === "open vscode") {
