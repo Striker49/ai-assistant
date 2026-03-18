@@ -62,23 +62,22 @@ function cleanReplyForSpeech(reply) {
 
 async function handleUserInput(userInput) {
   const trimmed = userInput.trim().toLowerCase();
+  console.log("trimmed:", trimmed);
 
   if (!trimmed) return;
   if (trimmed.toLowerCase() === "exit") {
     process.exit(0);
   }
 
-  if (/^remember /i.test(trimmed)) {
-    const data = trimmed.replace(/^remember /i, "").trim();
+  if (/^remember\W /i.test(trimmed)) {
+    const data = trimmed.replace(/^remember\W /i, "").trim();
     addMemory(data);
     console.log("🧠 Memory saved.");
-    //return;
   }
 
   if (trimmed.toLowerCase() === "open vscode") {
     exec("code");
     console.log("Opening VSCode...");
-    return;
   }
 
   const reply = await askAI(trimmed);
