@@ -1,11 +1,11 @@
 import OpenAI from "openai";
 import readlineSync from "readline-sync";
-import fs, { mkdirSync } from "fs";
+import fs from "fs";
 import dotenv from "dotenv";
-import { exec, execFileSync, spawn } from "child_process";
-import { MEMORY_FILE, MAX_TURNS} from "./config.js";
+import { MEMORY_FILE, MAX_TURNS } from "./config.js";
 import { loadJsonArray, addMemory, getRelevantMemories } from "./memory.js";
 import { recordAudio, transcribeAudio, textToAudio, stopAudio } from "./voice.js";
+import { tools } from "./tools.js";
 
 dotenv.config();
 
@@ -21,80 +21,148 @@ const openai = new OpenAI({
   },
 });
 
-async function askAI(message) {
+function buildSystemPrompt(latestUserMessage = "") {
+  const relevantMemories = getRelevantMemories(memory, latestUserMessage);
 
-  conversationHistory.push({ role: "user", content: message });
-  conversationHistory = conversationHistory.slice(-MAX_TURNS * 2);
-
-  const relevantMemories = getRelevantMemories(memory, message);
-
-  const systemPrompt = `You are Catherine, Sebastien's personal AI assistant.
+  return `You are Catherine, Sebastien's personal AI assistant.
     Be helpful, natural, and concise.
     Keep responses suitable for speaking out loud.
-    Avoid unnecessary formatting.
-    Maintain context across the conversation — follow-ups continue from the previous exchange.
+    Maintain context across the conversation.
+
+    You can either:
+    - answer normally
+    - or request a tool call when an action is needed
+
+    IMPORTANT:
+    - Never pretend you performed an action if no tool was used.
+    - When you want to use a tool, reply ONLY with valid JSON.
+    - The JSON format must be exactly:
+    {"tool":"tool_name","args":{"key":"value"}}
+    - If no tool is needed, answer normally.
+
+    Available tools:
+    - open_vscode: Open Visual Studio Code. Args: {}
+    - read_file: Read a text file from disk. Args: { "path": "string" }
+    - write_file: Write a text file. Args: { "path": "string", "content": "string" }
+    - list_files: List files in a directory. Args: { "path": "string" }
+
     ${
       relevantMemories.length > 0
         ? `Relevant memory: ${JSON.stringify(relevantMemories)}`
         : ""
     }`;
+}
 
-    const trimmedHistory = conversationHistory.slice(-MAX_TURNS);
+async function askAIFromHistory(latestUserMessage = "") {
+  const systemPrompt = buildSystemPrompt(latestUserMessage);
 
-    const completion = await openai.chat.completions.create({
-      model: "openrouter/hunter-alpha",
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...trimmedHistory,
-      ],
-    });
+  const trimmedHistory = conversationHistory.slice(-MAX_TURNS * 2);
 
-    const reply = completion.choices?.[0]?.message?.content ?? "I couldn't generate a reply.";
-    conversationHistory.push({ role: "assistant", content: reply });
-    conversationHistory = conversationHistory.slice(-MAX_TURNS * 2);
+  const completion = await openai.chat.completions.create({
+    model: "openrouter/hunter-alpha",
+    messages: [
+      { role: "system", content: systemPrompt },
+      ...trimmedHistory,
+    ],
+  });
 
-    return reply;
+  return completion.choices?.[0]?.message?.content ?? "I couldn't generate a reply.";
+}
+
+function tryParseToolCall(reply) {
+  try {
+    const parsed = JSON.parse(reply);
+    if (parsed.tool && parsed.args !== undefined) {
+      return parsed;
+    }
+  } catch (e) {}
+  return null;
+}
+
+async function handleAgenticTurn(userInput) {
+  conversationHistory.push({ role: "user", content: userInput });
+  conversationHistory = conversationHistory.slice(-MAX_TURNS * 2);
+
+  for (let i = 0; i < 5; i++) {
+    const reply = await askAIFromHistory(userInput);
+    const toolCall = tryParseToolCall(reply);
+
+    if (!toolCall) {
+      conversationHistory.push({ role: "assistant", content: reply });
+      conversationHistory = conversationHistory.slice(-MAX_TURNS * 2);
+      return reply;
+    }
+
+    const tool = tools[toolCall.tool];
+
+    if (!tool) {
+      conversationHistory.push({
+        role: "system",
+        content: `Unknown tool: ${toolCall.tool}`,
+      });
+      continue;
+    }
+
+    try {
+      const result = await tool.execute(toolCall.args || {});
+
+      conversationHistory.push({
+        role: "assistant",
+        content: reply,
+      });
+
+      conversationHistory.push({
+        role: "system",
+        content: `Tool result for ${toolCall.tool}: ${typeof result === "string" ? result : JSON.stringify(result)}`,
+      });
+
+      conversationHistory = conversationHistory.slice(-MAX_TURNS * 2);
+    } catch (err) {
+      conversationHistory.push({
+        role: "system",
+        content: `Tool ${toolCall.tool} failed: ${err.message}`,
+      });
+    }
   }
 
+  const fallback = "I couldn't finish the task.";
+  conversationHistory.push({ role: "assistant", content: fallback });
+  return fallback;
+}
 
 function cleanReplyForSpeech(reply) {
   return reply.replace(/\*/g, "").trim();
 }
 
-
 function tryHandlingCommand(userInput) {
-  const trimmed = userInput.replace(/\.+$/g, "");
+  const trimmed = userInput.replace(/\.+$/g, "").trim();
+
   if (trimmed.toLowerCase() === "exit") {
     process.exit(0);
   }
 
-  if (/^remember\s+/i.test(trimmed.toLowerCase())) {
-    const data = trimmed.replace(/^remember\W /i, "").trim();
+  if (/^remember\s+/i.test(trimmed)) {
+    const data = trimmed.replace(/^remember\s+/i, "").trim();
     addMemory(data);
+    memory = loadJsonArray(MEMORY_FILE);
     console.log("🧠 Memory saved.");
-  }
-
-  if (trimmed.toLowerCase() === "open vs code" || trimmed.toLowerCase() === "open vscode") {
-    exec("code");
-    console.log("Opening VSCode...");
     return true;
   }
 
+  return false;
 }
 
 async function handleUserInput(userInput) {
   const trimmed = userInput.trim();
-
   if (!trimmed) return;
 
   stopAudio();
 
   if (tryHandlingCommand(trimmed)) return;
 
-  const reply = await askAI(trimmed);
-  console.log("\x1b[32mAI:", reply, "\x1b[0m\n");
-
-  await textToAudio(cleanReplyForSpeech(reply));
+  const finalReply = await handleAgenticTurn(trimmed);
+  console.log("\x1b[32mAI:", finalReply, "\x1b[0m\n");
+  await textToAudio(cleanReplyForSpeech(finalReply));
 }
 
 async function listenOnce() {
@@ -113,15 +181,13 @@ async function listenOnce() {
   await handleUserInput(transcript);
 }
 
-function createfolders() {
-  if (!fs.existsSync('audio'))
-    fs.mkdirSync('audio');
-  if (!fs.existsSync('memory'))
-    fs.mkdirSync('memory');
+function createFolders() {
+  if (!fs.existsSync("audio")) fs.mkdirSync("audio");
+  if (!fs.existsSync("memory")) fs.mkdirSync("memory");
 }
 
 async function main() {
-  createfolders();
+  createFolders();
   console.log("🤖 AI Assistant started.");
   console.log("Type normally, or use /voice to speak, or 'exit' to quit.");
 
