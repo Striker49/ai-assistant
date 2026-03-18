@@ -5,13 +5,12 @@ import dotenv from "dotenv";
 import { exec, execFileSync, spawn } from "child_process";
 import { MEMORY_FILE, MAX_TURNS} from "./config.js";
 import { loadJsonArray, addMemory, getRelevantMemories } from "./memory.js";
-import { recordAudio, transcribeAudio, textToAudio } from "./voice.js"
+import { recordAudio, transcribeAudio, textToAudio, stopAudio } from "./voice.js";
 
 dotenv.config();
 
 let memory = loadJsonArray(MEMORY_FILE);
 let conversationHistory = [];
-let busy = false;
 
 const openai = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
@@ -25,6 +24,7 @@ const openai = new OpenAI({
 async function askAI(message) {
 
   conversationHistory.push({ role: "user", content: message });
+  conversationHistory = conversationHistory.slice(-MAX_TURNS * 2);
 
   const relevantMemories = getRelevantMemories(memory, message);
 
@@ -51,6 +51,7 @@ async function askAI(message) {
 
     const reply = completion.choices?.[0]?.message?.content ?? "I couldn't generate a reply.";
     conversationHistory.push({ role: "assistant", content: reply });
+    conversationHistory = conversationHistory.slice(-MAX_TURNS * 2);
 
     return reply;
   }
@@ -61,19 +62,19 @@ function cleanReplyForSpeech(reply) {
 }
 
 
-function tryHandlingCOmmand(userInput) {
+function tryHandlingCommand(userInput) {
   const trimmed = userInput.replace(/\.+$/g, "");
-  if (trimmed === "exit") {
+  if (trimmed.toLowerCase() === "exit") {
     process.exit(0);
   }
 
-  if (/^remember\W /i.test(trimmed)) {
+  if (/^remember\s+/i.test(trimmed.toLowerCase())) {
     const data = trimmed.replace(/^remember\W /i, "").trim();
     addMemory(data);
     console.log("🧠 Memory saved.");
   }
 
-  if (trimmed === "open vs code" || trimmed === "open vscode") {
+  if (trimmed.toLowerCase() === "open vs code" || trimmed.toLowerCase() === "open vscode") {
     exec("code");
     console.log("Opening VSCode...");
     return true;
@@ -82,12 +83,13 @@ function tryHandlingCOmmand(userInput) {
 }
 
 async function handleUserInput(userInput) {
-  const trimmed = userInput.trim().toLowerCase();
-  //console.log("trimmed:", trimmed);
+  const trimmed = userInput.trim();
 
   if (!trimmed) return;
 
-  if (tryHandlingCOmmand(trimmed)) return;
+  stopAudio();
+
+  if (tryHandlingCommand(trimmed)) return;
 
   const reply = await askAI(trimmed);
   console.log("\x1b[32mAI:", reply, "\x1b[0m\n");
@@ -124,11 +126,8 @@ async function main() {
   console.log("Type normally, or use /voice to speak, or 'exit' to quit.");
 
   while (true) {
-    if (busy) continue;
-
     const userInput = readlineSync.question("> ");
 
-    busy = true;
     try {
       if (userInput.trim() === "/voice") {
         await listenOnce();
@@ -137,8 +136,6 @@ async function main() {
       }
     } catch (err) {
       console.error("Error:", err.message);
-    } finally {
-      busy = false;
     }
   }
 }

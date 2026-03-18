@@ -1,6 +1,16 @@
-import fs from 'fs'
+import fs from "fs";
 import { AUDIO_FILE, MIC_NAME, WHISPER_EXE, WHISPER_MODEL } from "./config.js";
-import { execFileSync, spawn } from "child_process";
+import { spawn } from "child_process";
+
+let currentAudioPlayer = null;
+const OUTPUT_FILE = "audio/output.wav";
+
+export function stopAudio() {
+  if (currentAudioPlayer && !currentAudioPlayer.killed) {
+    currentAudioPlayer.kill();
+    currentAudioPlayer = null;
+  }
+}
 
 export async function textToAudio(message) {
   const safeMessage = encodeURIComponent(message);
@@ -11,8 +21,24 @@ export async function textToAudio(message) {
   }
 
   const audioBuffer = await response.arrayBuffer();
-  fs.writeFileSync("audio/output.wav", Buffer.from(audioBuffer));
-  execFileSync("ffplay", ["-nodisp", "-autoexit", "-loglevel", "quiet", "audio/output.wav"]);
+  fs.writeFileSync(OUTPUT_FILE, Buffer.from(audioBuffer));
+
+  stopAudio();
+
+  currentAudioPlayer = spawn(
+    "ffplay",
+    ["-nodisp", "-autoexit", "-loglevel", "quiet", OUTPUT_FILE],
+    { stdio: "ignore" }
+  );
+
+  currentAudioPlayer.on("close", () => {
+    currentAudioPlayer = null;
+  });
+
+  currentAudioPlayer.on("error", (err) => {
+    console.error("Audio playback error:", err.message);
+    currentAudioPlayer = null;
+  });
 }
 
 export function recordAudio(durationMs = 5000) {
